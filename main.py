@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mihomo Hub & Subscription Converter for Android (Full HWID + Client Edition)
+Mihomo Hub & Subscription Converter for Android (Strict Remnawave HWID Standard)
 """
 from __future__ import annotations
 
@@ -38,11 +38,12 @@ CLIENT_PRESETS = {
     "throne": ("Throne (Windows)", "Throne/1.1.2", {
         "x-device-os": "Windows", "x-device-model": "H510M H", "x-ver-os": "10.0.26200", "accept-encoding": "gzip, deflate", "accept-language": "ru-RU,en,*"
     }),
-    "v2rayng": ("v2rayNG (Android)", "v2rayNG/1.8.9", {}),
-    "hiddify": ("Hiddify", "HiddifyNext/2.0.5 (linux; amd64)", {}),
-    "happ": ("Happ (iOS)", "Happ/1.4.2 CFNetwork/1494.0.7 Darwin/23.4.0", {}),
-    "singbox": ("sing-box", "sing-box/1.8.6 (linux; amd64)", {}),
-    "nekoray": ("Nekoray", "Nekoray/3.26 (linux; amd64)", {}),
+    "happ": ("Happ (iOS)", "Happ/1.4.2 CFNetwork/1494.0.7 Darwin/23.4.0", {
+        "x-device-os": "iOS", "x-device-model": "iPhone 15 Pro", "x-ver-os": "17.4"
+    }),
+    "v2rayng": ("v2rayNG (Android)", "v2rayNG/1.8.9", {
+        "x-device-os": "Android", "x-device-model": "Pixel 8", "x-ver-os": "14"
+    }),
 }
 
 PROTO_PREFIXES = ("vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://")
@@ -161,13 +162,20 @@ def fetch_raw(url: str, user_agent: str, headers: dict) -> bytes:
     try: ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
     except Exception: pass
 
-    req = urllib.request.Request(url)
-    req.headers["User-Agent"] = user_agent
-    req.headers["Accept"] = "*/*"
-    req.headers["Connection"] = "keep-alive"
-    for k, v in headers.items():
-        req.headers[k] = str(v)
+    # Формируем строгий набор заголовков без дублирования регистров
+    clean_headers = {
+        "User-Agent": user_agent,
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+    }
 
+    # Переносим только уникальные заголовки в нижнем регистре
+    for k, v in headers.items():
+        kl = k.lower()
+        if kl not in ["user-agent", "accept", "connection"]:
+            clean_headers[kl] = str(v).strip()
+
+    req = urllib.request.Request(url, headers=clean_headers)
     with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
         return decompress(resp.read())
 
@@ -258,7 +266,15 @@ def build_mihomo_config_from_sources(sources: List[dict]) -> str:
                 node = url_to_mihomo(uri)
                 if node: incoming.append(node)
 
-    merged = dedupe_and_merge_proxies(base_cfg.get("proxies", []), incoming)
+    # Исключаем служебные заглушки панели вроде "Включите HWID" или пустые узлы
+    valid_proxies = []
+    for p in incoming:
+        name = p.get("name", "")
+        if "включите hwid" in name.lower() or "enable hwid" in name.lower():
+            continue
+        valid_proxies.append(p)
+
+    merged = dedupe_and_merge_proxies(base_cfg.get("proxies", []), valid_proxies)
     clean_names = [p["name"] for p in merged if p.get("name") and p.get("name") != "🇷🇺 Без VPN"]
 
     for g in base_cfg["proxy-groups"]:
@@ -325,9 +341,6 @@ def collect_entry_sources(entry: dict) -> List[dict]:
     except Exception: pass
     return []
 
-# ---------------------------------------------------------------------------
-# WEB UI С ПОДДЕРЖКОЙ HWID И USER-AGENT
-# ---------------------------------------------------------------------------
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -340,14 +353,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         h1 { color: #38bdf8; font-size: 1.4rem; border-bottom: 2px solid #1e293b; padding-bottom: 10px; margin-top: 5px; }
         .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
         .btn { background: #0284c7; color: #fff; border: none; padding: 12px; border-radius: 8px; font-weight: bold; width: 100%; font-size: 1rem; cursor: pointer; }
-        .btn-gen { background: #475569; padding: 8px; font-size: 0.8rem; border-radius: 6px; border:none; color:#fff; cursor:pointer; margin-bottom: 10px; }
+        .btn-gen { background: #334155; padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border:none; color:#38bdf8; cursor:pointer; }
         .btn-danger { background: #dc2626; padding: 6px 10px; width: auto; font-size: 0.8rem; border: none; color: #fff; border-radius: 6px; cursor: pointer; }
+        .btn-update { background: #0284c7; padding: 6px 10px; width: auto; font-size: 0.8rem; border: none; color: #fff; border-radius: 6px; cursor: pointer; }
         input, select { width: 100%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 10px; border-radius: 8px; box-sizing: border-box; margin-bottom: 12px; font-size: 0.95rem; }
         label { font-size: 0.85rem; color: #94a3b8; display: block; margin-bottom: 4px; }
         .sub-item { border-bottom: 1px solid #334155; padding: 12px 0; }
         .sub-header { display: flex; justify-content: space-between; align-items: center; }
         .sub-link { color: #38bdf8; font-size: 0.8rem; word-break: break-all; margin-top: 6px; display: block; text-decoration: none; }
-        .badge { background: #334155; color: #38bdf8; padding: 3px 6px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; }
+        .badge { background: #0f172a; border: 1px solid #334155; color: #38bdf8; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-family: monospace; display: inline-block; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -363,20 +377,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <label>Ссылка на подписку (URL):</label>
                 <input type="url" name="url" placeholder="https://..." required>
 
-                <label>Клиент / User-Agent:</label>
+                <label>Клиент эмуляции (User-Agent):</label>
                 <select name="client">
-                    <option value="flclash">FlClash X (Windows) — Рекомендуется для обхода</option>
-                    <option value="throne">Throne (Windows) — С заголовками H510M</option>
-                    <option value="v2rayng">v2rayNG (Android)</option>
-                    <option value="hiddify">Hiddify (Linux/Android)</option>
+                    <option value="flclash">FlClash X (Windows 11) — Стандарт для Remnawave</option>
+                    <option value="throne">Throne (Windows)</option>
                     <option value="happ">Happ (iOS)</option>
-                    <option value="singbox">sing-box</option>
-                    <option value="nekoray">Nekoray</option>
+                    <option value="v2rayng">v2rayNG (Android)</option>
                 </select>
 
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <label style="margin:0;">HWID устройства:</label>
-                    <button type="button" class="btn-gen" onclick="genHWID()">🎲 Сгенерировать новый</button>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                    <label style="margin:0;">HWID устройства (UUID):</label>
+                    <button type="button" class="btn-gen" onclick="genHWID()">🎲 Новый UUID</button>
                 </div>
                 <input type="text" id="hwid_field" name="hwid" placeholder="Оставьте пустым для авто-генерации">
 
@@ -385,7 +396,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div class="card">
-            <h3 style="margin-top:0;">📋 Ваши подписки для FlClash / Hiddify:</h3>
+            <h3 style="margin-top:0;">📋 Ваши подписки:</h3>
             <div id="subs-list"></div>
         </div>
     </div>
@@ -407,21 +418,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             for (const [id, s] of Object.entries(subs)) {
                 const div = document.createElement('div');
                 div.className = 'sub-item';
-                const hwid = (s.headers && (s.headers['x-hwid'] || s.headers['X-HWID'])) || 'Не задан';
+                const hwid = (s.headers && s.headers['x-hwid']) || 'Не задан';
                 div.innerHTML = `
                     <div class="sub-header">
                         <div>
                             <strong>${s.name}</strong>
-                            <div style="margin-top:4px;">
-                                <span class="badge">HWID: ${hwid}</span>
-                            </div>
                         </div>
                         <form action="/api/delete_sub" method="POST" style="margin:0;">
                             <input type="hidden" name="id" value="${id}">
                             <button type="submit" class="btn-danger">Удалить</button>
                         </form>
                     </div>
-                    <a class="sub-link" href="/${id}?format=mihomo">http://127.0.0.1:12096/${id}?format=mihomo</a>
+                    <div style="margin: 8px 0;">
+                        <span style="font-size:0.8rem; color:#94a3b8;">Привязанный HWID (нажмите чтобы скопировать):</span><br>
+                        <span class="badge" onclick="navigator.clipboard.writeText('${hwid}'); alert('HWID скопирован в буфер!');" style="cursor:pointer;">📋 ${hwid}</span>
+                    </div>
+                    <form action="/api/update_hwid" method="POST" style="display:flex; gap:6px; margin-top:6px;">
+                        <input type="hidden" name="id" value="${id}">
+                        <input type="text" name="hwid" placeholder="Задать другой HWID" style="margin:0; padding:6px; font-size:0.85rem;" required>
+                        <button type="submit" class="btn-update">Сменить</button>
+                    </form>
+                    <a class="sub-link" href="/${id}?format=mihomo">Ссылка для FlClash: http://127.0.0.1:12096/${id}?format=mihomo</a>
                 `;
                 container.appendChild(div);
             }
@@ -496,10 +513,6 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
                 
                 hdrs = dict(default_headers)
                 hdrs["x-hwid"] = hwid
-                hdrs["X-HWID"] = hwid
-                hdrs["X-Device-Id"] = hwid
-                hdrs["device-id"] = hwid
-                hdrs["x-client-id"] = hwid
 
                 cfg = load_config()
                 uid = str(_uuid.uuid4())[:8]
@@ -512,6 +525,14 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
                 }
                 save_config(cfg)
 
+        elif p == "/api/update_hwid":
+            sid = data.get("id", [""])[0]
+            new_hwid = data.get("hwid", [""])[0].strip()
+            cfg = load_config()
+            if sid in cfg and new_hwid:
+                cfg[sid].setdefault("headers", {})["x-hwid"] = new_hwid
+                save_config(cfg)
+
         elif p == "/api/delete_sub":
             sid = data.get("id", [""])[0]
             cfg = load_config()
@@ -522,31 +543,4 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def start_server():
-    server = HTTPServer(("0.0.0.0", PORT), AndroidProxyHandler)
-    server.serve_forever()
-
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.core.window import Window
-
-class MihomoHubApp(App):
-    def build(self):
-        Window.clearcolor = (0.06, 0.09, 0.16, 1)
-        layout = BoxLayout(orientation='vertical', padding=25, spacing=15)
-        lbl_title = Label(text="⚡ Mihomo Android Hub", font_size='22sp', bold=True, size_hint_y=0.25)
-        lbl_status = Label(text="Сервер запущен:\n127.0.0.1:12096", font_size='16sp', halign='center', color=(0.2, 0.8, 0.4, 1), size_hint_y=0.35)
-        
-        btn_open = Button(text="🌐 Открыть панель управления", size_hint_y=0.25, background_color=(0.01, 0.52, 0.78, 1))
-        btn_open.bind(on_release=lambda x: webbrowser.open("http://127.0.0.1:12096/gui"))
-        
-        layout.add_widget(lbl_title)
-        layout.add_widget(lbl_status)
-        layout.add_widget(btn_open)
-        return layout
-
-if __name__ == "__main__":
-    t = threading.Thread(target=start_server, daemon=True)
-    t.start()
-    MihomoHubApp().run()
+    server
