@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mihomo Hub & Subscription Converter for Android (Strict Remnawave HWID Standard)
+Mihomo Hub & Subscription Converter for Android (Full HWID + Strict Headers)
 """
 from __future__ import annotations
 
@@ -162,14 +162,12 @@ def fetch_raw(url: str, user_agent: str, headers: dict) -> bytes:
     try: ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
     except Exception: pass
 
-    # Формируем строгий набор заголовков без дублирования регистров
     clean_headers = {
         "User-Agent": user_agent,
         "Accept": "*/*",
         "Connection": "keep-alive"
     }
 
-    # Переносим только уникальные заголовки в нижнем регистре
     for k, v in headers.items():
         kl = k.lower()
         if kl not in ["user-agent", "accept", "connection"]:
@@ -266,7 +264,6 @@ def build_mihomo_config_from_sources(sources: List[dict]) -> str:
                 node = url_to_mihomo(uri)
                 if node: incoming.append(node)
 
-    # Исключаем служебные заглушки панели вроде "Включите HWID" или пустые узлы
     valid_proxies = []
     for p in incoming:
         name = p.get("name", "")
@@ -543,4 +540,34 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def start_server():
-    server
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), AndroidProxyHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"Server error: {e}")
+
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.core.window import Window
+
+class MihomoHubApp(App):
+    def build(self):
+        Window.clearcolor = (0.06, 0.09, 0.16, 1)
+        layout = BoxLayout(orientation='vertical', padding=25, spacing=15)
+        lbl_title = Label(text="⚡ Mihomo Android Hub", font_size='22sp', bold=True, size_hint_y=0.25)
+        lbl_status = Label(text="Сервер запущен:\n127.0.0.1:12096", font_size='16sp', halign='center', color=(0.2, 0.8, 0.4, 1), size_hint_y=0.35)
+        
+        btn_open = Button(text="🌐 Открыть панель управления", size_hint_y=0.25, background_color=(0.01, 0.52, 0.78, 1))
+        btn_open.bind(on_release=lambda x: webbrowser.open("http://127.0.0.1:12096/gui"))
+        
+        layout.add_widget(lbl_title)
+        layout.add_widget(lbl_status)
+        layout.add_widget(btn_open)
+        return layout
+
+if __name__ == "__main__":
+    t = threading.Thread(target=start_server, daemon=True)
+    t.start()
+    MihomoHubApp().run()
