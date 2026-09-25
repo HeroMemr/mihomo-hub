@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mihomo Hub & Subscription Converter for Android (Full Edition, No WARP)
+Mihomo Hub & Subscription Converter for Android (Full HWID + Client Edition)
 """
 from __future__ import annotations
 
@@ -31,6 +31,20 @@ try:
 except ImportError:
     yaml = None
 
+CLIENT_PRESETS = {
+    "flclash": ("FlClash X (Windows)", "FlClash X/v0.3.2 Platform/windows", {
+        "x-device-os": "Windows", "x-device-model": "Windows 11 Pro", "x-ver-os": "25H2", "accept-encoding": "gzip"
+    }),
+    "throne": ("Throne (Windows)", "Throne/1.1.2", {
+        "x-device-os": "Windows", "x-device-model": "H510M H", "x-ver-os": "10.0.26200", "accept-encoding": "gzip, deflate", "accept-language": "ru-RU,en,*"
+    }),
+    "v2rayng": ("v2rayNG (Android)", "v2rayNG/1.8.9", {}),
+    "hiddify": ("Hiddify", "HiddifyNext/2.0.5 (linux; amd64)", {}),
+    "happ": ("Happ (iOS)", "Happ/1.4.2 CFNetwork/1494.0.7 Darwin/23.4.0", {}),
+    "singbox": ("sing-box", "sing-box/1.8.6 (linux; amd64)", {}),
+    "nekoray": ("Nekoray", "Nekoray/3.26 (linux; amd64)", {}),
+}
+
 PROTO_PREFIXES = ("vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://")
 
 def load_config() -> dict:
@@ -45,20 +59,6 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     with open(CONFIG_FILE, "w", encoding="utf-8") as f: 
         json.dump(cfg, f, indent=2, ensure_ascii=False)
-
-def load_custom_routing() -> dict:
-    if os.path.exists(CUSTOM_RULES_FILE):
-        try:
-            with open(CUSTOM_RULES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    default_routing = {"groups": []}
-    return default_routing
-
-def save_custom_routing(data: dict):
-    with open(CUSTOM_RULES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 def default_rule_providers() -> Dict[str, dict]:
     return {
@@ -158,11 +158,16 @@ def fetch_raw(url: str, user_agent: str, headers: dict) -> bytes:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    try: ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except Exception: pass
+
     req = urllib.request.Request(url)
     req.headers["User-Agent"] = user_agent
     req.headers["Accept"] = "*/*"
+    req.headers["Connection"] = "keep-alive"
     for k, v in headers.items():
         req.headers[k] = str(v)
+
     with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
         return decompress(resp.read())
 
@@ -212,6 +217,26 @@ def parse_hy2(url: str) -> Optional[dict]:
         p = urlparse(url)
         port = int(p.port) if p.port else 443
         return {"name": unquote(p.fragment or "hy2"), "type": "hysteria2", "server": p.hostname, "port": port, "password": unquote(p.username or ""), "udp": True}
+    except Exception: return None
+
+def parse_singbox_json(text: str) -> Optional[List[str]]:
+    SINGBOX_TYPES = {"vless", "vmess", "trojan", "shadowsocks", "hysteria2"}
+    try:
+        data = json.loads(text)
+        cfgs = data if isinstance(data, list) else [data]
+        uris = []
+        for cfg in cfgs:
+            if not isinstance(cfg, dict): continue
+            for ob in cfg.get("outbounds", []):
+                t = ob.get("type", "")
+                if t in SINGBOX_TYPES:
+                    s, p = ob.get("server", ""), ob.get("server_port", 443)
+                    name = ob.get("tag", "proxy")
+                    if t == "vless":
+                        uris.append(f"vless://{ob.get('uuid')}@{s}:{p}?type=tcp#{quote(name)}")
+                    elif t == "hysteria2":
+                        uris.append(f"hy2://{ob.get('password', '')}@{s}:{p}#{quote(name)}")
+        return uris if uris else None
     except Exception: return None
 
 def url_to_mihomo(url: str) -> Optional[dict]:
@@ -265,38 +290,44 @@ def dedupe_and_merge_proxies(existing: List[dict], incoming: List[dict]) -> List
         res.append(p)
     return res
 
-def collect_entry_sources(entry: dict, cfg: dict) -> List[dict]:
-    if entry.get("type") == "merge":
-        res = []
-        for s in entry.get("sources", []):
-            if s in cfg: res.extend(collect_entry_sources(cfg[s], cfg))
-        return res
+def collect_entry_sources(entry: dict) -> List[dict]:
     try:
         url = entry.get("url", "")
-        if url.startswith("data:text/yaml;base64,"):
-            text = base64.b64decode(url.split(",", 1)[1]).decode("utf-8")
-        else:
-            text = fetch_raw(url, entry.get("user_agent", "v2rayNG/1.8.9"), entry.get("headers", {})).decode("utf-8", errors="replace")
-    except Exception:
+        ua = entry.get("user_agent") or "FlClash X/v0.3.2 Platform/windows"
+        hdrs = dict(entry.get("headers", {}))
+        text = fetch_raw(url, ua, hdrs).decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"Fetch error: {e}")
         return []
 
     if yaml:
         try:
             y = yaml.safe_load(text)
-            if isinstance(y, dict) and (isinstance(y.get("proxies"), list) or isinstance(y.get("Proxy"), list)):
-                return [{"kind": "yaml", "cfg": y}]
+            if isinstance(y, dict):
+                if isinstance(y.get("proxies"), list): return [{"kind": "yaml", "cfg": y}]
+                if isinstance(y.get("Proxy"), list): 
+                    y["proxies"] = y.pop("Proxy")
+                    return [{"kind": "yaml", "cfg": y}]
         except Exception: pass
+
+    sg = parse_singbox_json(text)
+    if sg: return [{"kind": "uris", "uris": sg}]
 
     lines = [l.strip() for l in text.splitlines() if any(l.strip().startswith(p) for p in PROTO_PREFIXES)]
     if lines: return [{"kind": "uris", "uris": lines}]
 
     try:
         dec = base64.b64decode(re.sub(r'\s+', '', text) + "==").decode("utf-8", errors="replace")
+        sg_dec = parse_singbox_json(dec)
+        if sg_dec: return [{"kind": "uris", "uris": sg_dec}]
         lines_dec = [l.strip() for l in dec.splitlines() if any(l.strip().startswith(p) for p in PROTO_PREFIXES)]
         if lines_dec: return [{"kind": "uris", "uris": lines_dec}]
     except Exception: pass
     return []
 
+# ---------------------------------------------------------------------------
+# WEB UI С ПОДДЕРЖКОЙ HWID И USER-AGENT
+# ---------------------------------------------------------------------------
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -305,15 +336,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <title>Mihomo Hub</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 15px; }
-        .container { max-width: 600px; margin: 0 auto; }
+        .container { max-width: 650px; margin: 0 auto; }
         h1 { color: #38bdf8; font-size: 1.4rem; border-bottom: 2px solid #1e293b; padding-bottom: 10px; margin-top: 5px; }
         .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
         .btn { background: #0284c7; color: #fff; border: none; padding: 12px; border-radius: 8px; font-weight: bold; width: 100%; font-size: 1rem; cursor: pointer; }
+        .btn-gen { background: #475569; padding: 8px; font-size: 0.8rem; border-radius: 6px; border:none; color:#fff; cursor:pointer; margin-bottom: 10px; }
         .btn-danger { background: #dc2626; padding: 6px 10px; width: auto; font-size: 0.8rem; border: none; color: #fff; border-radius: 6px; cursor: pointer; }
-        input { width: 100%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 10px; border-radius: 8px; box-sizing: border-box; margin-bottom: 12px; }
+        input, select { width: 100%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 10px; border-radius: 8px; box-sizing: border-box; margin-bottom: 12px; font-size: 0.95rem; }
         label { font-size: 0.85rem; color: #94a3b8; display: block; margin-bottom: 4px; }
-        .sub-item { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding: 10px 0; }
-        .sub-link { color: #38bdf8; font-size: 0.8rem; word-break: break-all; margin-top: 4px; display: block; text-decoration: none; }
+        .sub-item { border-bottom: 1px solid #334155; padding: 12px 0; }
+        .sub-header { display: flex; justify-content: space-between; align-items: center; }
+        .sub-link { color: #38bdf8; font-size: 0.8rem; word-break: break-all; margin-top: 6px; display: block; text-decoration: none; }
+        .badge { background: #334155; color: #38bdf8; padding: 3px 6px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; }
     </style>
 </head>
 <body>
@@ -324,37 +358,70 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <h3 style="margin-top:0;">➕ Добавить подписку</h3>
             <form action="/api/add_sub" method="POST">
                 <label>Название:</label>
-                <input type="text" name="name" placeholder="Мой VPN" required>
+                <input type="text" name="name" placeholder="Например: Мой VPN" required>
+
                 <label>Ссылка на подписку (URL):</label>
                 <input type="url" name="url" placeholder="https://..." required>
+
+                <label>Клиент / User-Agent:</label>
+                <select name="client">
+                    <option value="flclash">FlClash X (Windows) — Рекомендуется для обхода</option>
+                    <option value="throne">Throne (Windows) — С заголовками H510M</option>
+                    <option value="v2rayng">v2rayNG (Android)</option>
+                    <option value="hiddify">Hiddify (Linux/Android)</option>
+                    <option value="happ">Happ (iOS)</option>
+                    <option value="singbox">sing-box</option>
+                    <option value="nekoray">Nekoray</option>
+                </select>
+
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <label style="margin:0;">HWID устройства:</label>
+                    <button type="button" class="btn-gen" onclick="genHWID()">🎲 Сгенерировать новый</button>
+                </div>
+                <input type="text" id="hwid_field" name="hwid" placeholder="Оставьте пустым для авто-генерации">
+
                 <button type="submit" class="btn">Сохранить подписку</button>
             </form>
         </div>
 
         <div class="card">
-            <h3 style="margin-top:0;">📋 Ваши ссылки для FlClash / Hiddify:</h3>
+            <h3 style="margin-top:0;">📋 Ваши подписки для FlClash / Hiddify:</h3>
             <div id="subs-list"></div>
         </div>
     </div>
 
     <script>
+        function genHWID() {
+            const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+            document.getElementById('hwid_field').value = uuid;
+        }
+
         const subs = %SUBS_JSON%;
         const container = document.getElementById('subs-list');
         if (Object.keys(subs).length === 0) {
-            container.innerHTML = '<p style="color:#64748b; font-size:0.9rem;">Подписок пока нет. Добавьте выше первую ссылку.</p>';
+            container.innerHTML = '<p style="color:#64748b; font-size:0.9rem;">Подписок пока нет. Добавьте ссылку выше.</p>';
         } else {
             for (const [id, s] of Object.entries(subs)) {
                 const div = document.createElement('div');
                 div.className = 'sub-item';
+                const hwid = (s.headers && (s.headers['x-hwid'] || s.headers['X-HWID'])) || 'Не задан';
                 div.innerHTML = `
-                    <div style="flex-grow: 1; padding-right: 10px;">
-                        <strong>${s.name}</strong>
-                        <a class="sub-link" href="/${id}?format=mihomo">http://127.0.0.1:12096/${id}?format=mihomo</a>
+                    <div class="sub-header">
+                        <div>
+                            <strong>${s.name}</strong>
+                            <div style="margin-top:4px;">
+                                <span class="badge">HWID: ${hwid}</span>
+                            </div>
+                        </div>
+                        <form action="/api/delete_sub" method="POST" style="margin:0;">
+                            <input type="hidden" name="id" value="${id}">
+                            <button type="submit" class="btn-danger">Удалить</button>
+                        </form>
                     </div>
-                    <form action="/api/delete_sub" method="POST" style="margin:0;">
-                        <input type="hidden" name="id" value="${id}">
-                        <button type="submit" class="btn-danger">Удалить</button>
-                    </form>
+                    <a class="sub-link" href="/${id}?format=mihomo">http://127.0.0.1:12096/${id}?format=mihomo</a>
                 `;
                 container.appendChild(div);
             }
@@ -399,7 +466,7 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
             return
 
         entry = cfg[uid]
-        sources = collect_entry_sources(entry, cfg)
+        sources = collect_entry_sources(entry)
         out_yaml = build_mihomo_config_from_sources(sources).encode("utf-8")
 
         self.send_response(200)
@@ -420,11 +487,31 @@ class AndroidProxyHandler(BaseHTTPRequestHandler):
         if p == "/api/add_sub":
             name = data.get("name", ["VPN"])[0]
             url = data.get("url", [""])[0]
+            client_key = data.get("client", ["flclash"])[0]
+            custom_hwid = data.get("hwid", [""])[0].strip()
+
             if url:
+                label, ua, default_headers = CLIENT_PRESETS.get(client_key, CLIENT_PRESETS["flclash"])
+                hwid = custom_hwid if custom_hwid else str(_uuid.uuid4())
+                
+                hdrs = dict(default_headers)
+                hdrs["x-hwid"] = hwid
+                hdrs["X-HWID"] = hwid
+                hdrs["X-Device-Id"] = hwid
+                hdrs["device-id"] = hwid
+                hdrs["x-client-id"] = hwid
+
                 cfg = load_config()
                 uid = str(_uuid.uuid4())[:8]
-                cfg[uid] = {"name": name, "type": "single", "url": url, "headers": {"x-hwid": str(_uuid.uuid4())}}
+                cfg[uid] = {
+                    "name": name,
+                    "type": "single",
+                    "url": url,
+                    "user_agent": ua,
+                    "headers": hdrs
+                }
                 save_config(cfg)
+
         elif p == "/api/delete_sub":
             sid = data.get("id", [""])[0]
             cfg = load_config()
